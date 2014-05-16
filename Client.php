@@ -194,7 +194,7 @@ class Client
                 $nodeArr = explode(' ', $allNodes[$i]);
                 
                 // we add the master node only if its state is connected
-                if($nodeArr[count($nodeArr)-1]!='disconnected') {
+                if ($nodeArr[count($nodeArr) - 1] != 'disconnected') {
                     $slots = explode('-', $nodeArr[8], 2);
                     $host = $nodeArr[1];
                     $hostArr = explode(':', $host);
@@ -225,28 +225,22 @@ class Client
                 }
             }
         }
-        foreach($slaveNodes as &$slave) {
+        foreach ($slaveNodes as &$slave) {
             // if it's a not connected slave, we set it to the master
-            if(!isset($slave['ip'])) {
-                $slave['ip']=$masterNodes[$slave['slaveof']]['ip'];
-                $slave['port']=$masterNodes[$slave['slaveof']]['port'];
-                $slave['min']=$masterNodes[$slave['slaveof']]['min'];
-                $slave['max']=$masterNodes[$slave['slaveof']]['max'];
-            }
-            // else we just take the min and max from the corresponding master 
+            if (! isset($slave['ip'])) {
+                $slave['ip'] = $masterNodes[$slave['slaveof']]['ip'];
+                $slave['port'] = $masterNodes[$slave['slaveof']]['port'];
+                $slave['min'] = $masterNodes[$slave['slaveof']]['min'];
+                $slave['max'] = $masterNodes[$slave['slaveof']]['max'];
+            }             // else we just take the min and max from the corresponding master
             else {
-                $slave['min']=$masterNodes[$slave['slaveof']]['min'];
-                $slave['max']=$masterNodes[$slave['slaveof']]['max'];
+                $slave['min'] = $masterNodes[$slave['slaveof']]['min'];
+                $slave['max'] = $masterNodes[$slave['slaveof']]['max'];
             }
         }
         
         $this->masterNodes = $masterNodes;
         $this->slaveNodes = $slaveNodes;
-        
-        print_r($this->masterNodes);
-        print_r($this->slaveNodes);
-        
-        
     }
 
     public function __call($method, $args = array())
@@ -268,8 +262,6 @@ class Client
                 $isCommandForSlave = false;
                 $hashingAlgo = $hashingAlgo - 10;
             }
-            
-            echo ($isCommandForSlave?'slave':'master') . PHP_EOL;
             
             if (count($args)) {
                 
@@ -302,26 +294,24 @@ class Client
                 if ($keyUsedForHash != null) {
                     $hash = $this->hash($keyUsedForHash) % 16384;
                     
-                    echo $hash . PHP_EOL;
-                    
                     $selectedNodes = ($isCommandForSlave ? $this->slaveNodes : $this->masterNodes);
                     
                     $choseNodeId = null;
-
+                    
                     foreach ($selectedNodes as $potentialNodeId => $potentialNode) {
                         if ($hash >= $potentialNode['min'] && $hash <= $potentialNode['max']) {
                             $choseNodeId = $potentialNodeId;
                             break;
                         }
                     }
-                                 
+                    
                     $connection = $this->connect($choseNodeId, $selectedNodes[$choseNodeId]);
-                    if($isCommandForSlave) {
-                        // array all the things !
-                        phpiredis_multi_command($connection, array_merge((array)'READONLY', array_merge(array($command), (array)$args)));
-                    }
-                    else {
-                        phpiredis_command_bs($connection, array_merge(array($command), (array)$args));
+                    if ($isCommandForSlave) {
+                        $fullCommand = array('READONLY', $command . ' ' . implode(' ', $args));
+                        $output = phpiredis_multi_command($connection, $fullCommand);
+                        return $output[1];
+                    } else {
+                        return phpiredis_command_bs($connection, array_merge(array($command), (array)($args)));
                     }
                 }
             }
@@ -330,6 +320,7 @@ class Client
 
     private function connect($nodeId, $node)
     {
+        
         if (! isset($this->connections[$nodeId])) {
             $this->connections[$nodeId] = phpiredis_connect($node['ip'], $node['port']);
         }
@@ -345,11 +336,11 @@ class Client
         $crc = 0;
         $CCITT_16 = self::$CCITT_16;
         $strlen = strlen($value);
-
-        for ($i = 0; $i < $strlen; $i++) {
+        
+        for ($i = 0; $i < $strlen; $i ++) {
             $crc = (($crc << 8) ^ $CCITT_16[($crc >> 8) ^ ord($value[$i])]) & 0xFFFF;
         }
-
+        
         return $crc;
     }
 
