@@ -5,7 +5,7 @@ class Client
 {
     
     // all the nodes from the main code
-    private $nodes = array();
+    private $allNodes = array();
     
     // master nodes, for writing
     private $masterNodes = array();
@@ -125,7 +125,7 @@ class Client
         /* commands operating on hyperLogLog */
         'PFADD' => 10,
         'PFMERGE' => 10,
-        'PFCOUNT' => 0,
+        'PFCOUNT' => 10, /* PFCOUNT is not a readonly command because of some server-side caching */
     
         /* scripting */
         'EVAL' => 14, // TODO
@@ -141,10 +141,12 @@ class Client
 
     public function addNode($ip, $port)
     {
-        $this->nodes[] = array(
-            'ip' => $ip,
-            'port' => $port
-        );
+        if (! isset($this->allNodes[$ip . ':' . $port])) {
+            $this->allNodes[$ip . ':' . $port] = array(
+                'ip' => $ip,
+                'port' => $port
+            );
+        }
     }
 
     public function getClusterTopology()
@@ -153,8 +155,10 @@ class Client
         $nbTries = 0;
         $client = false;
         
-        while ($nbTries < count($this->nodes) && $client === false) {
-            $randomNode = $this->nodes[$nbTries];
+        $nodes = array_values($this->allNodes);
+        
+        while ($nbTries < count($nodes) && $client === false) {
+            $randomNode = $nodes[$nbTries];
             // creates the connection to the random node
             $client = phpiredis_connect($randomNode['ip'], $randomNode['port']);
             $nbTries ++;
@@ -185,13 +189,14 @@ class Client
         $masterNodes = array();
         $slaveNodes = array();
         
-        $allNodes = explode("\n", $response, - 1);
-        $count = count($allNodes);
+        $clusterNodes = explode("\n", $response, - 1);
+        $count = count($clusterNodes);
+        
         
         for ($i = 0; $i < $count; $i ++) {
-            if (strpos($allNodes[$i], 'slave') <= 0) {
+            if (strpos($clusterNodes[$i], 'slave') <= 0) {
                 
-                $nodeArr = explode(' ', $allNodes[$i]);
+                $nodeArr = explode(' ', $clusterNodes[$i]);
                 
                 // we add the master node only if its state is connected
                 if ($nodeArr[count($nodeArr) - 1] != 'disconnected') {
@@ -207,7 +212,7 @@ class Client
                     );
                 }
             } else {
-                $nodeArr = explode(' ', $allNodes[$i], 9);
+                $nodeArr = explode(' ', $clusterNodes[$i], 9);
                 
                 // it the slave is not connected, we will use the master instead without any warning
                 if ($nodeArr[7] != 'connected') {
@@ -226,17 +231,14 @@ class Client
             }
         }
         foreach ($slaveNodes as &$slave) {
-            // if it's a not connected slave, we set it to the master
+            // if it's a slave that is not connected, we add the corresponding master
             if (! isset($slave['ip'])) {
                 $slave['ip'] = $masterNodes[$slave['slaveof']]['ip'];
                 $slave['port'] = $masterNodes[$slave['slaveof']]['port'];
-                $slave['min'] = $masterNodes[$slave['slaveof']]['min'];
-                $slave['max'] = $masterNodes[$slave['slaveof']]['max'];
-            }             // else we just take the min and max from the corresponding master
-            else {
-                $slave['min'] = $masterNodes[$slave['slaveof']]['min'];
-                $slave['max'] = $masterNodes[$slave['slaveof']]['max'];
-            }
+               
+            }             
+            $slave['min'] = $masterNodes[$slave['slaveof']]['min'];
+            $slave['max'] = $masterNodes[$slave['slaveof']]['max'];
         }
         
         $this->masterNodes = $masterNodes;
@@ -307,11 +309,20 @@ class Client
                     
                     $connection = $this->connect($choseNodeId, $selectedNodes[$choseNodeId]);
                     if ($isCommandForSlave) {
-                        $fullCommand = array('READONLY', $command . ' ' . implode(' ', $args));
+                        $fullCommand = array(
+                            'READONLY',
+                            $command . ' ' . implode(' ', $args)
+                        );
                         $output = phpiredis_multi_command($connection, $fullCommand);
-                        return $output[1];
+                        return $output;
                     } else {
-                        return phpiredis_command_bs($connection, array_merge(array($command), (array)($args)));
+                        foreach ($args as &$arg) {
+                            $arg = strval($arg);
+                        }
+                        $output = phpiredis_command_bs($connection, array_merge(array(
+                            $command
+                        ), (array) ($args)));
+                        return $output;
                     }
                 }
             }
@@ -320,7 +331,6 @@ class Client
 
     private function connect($nodeId, $node)
     {
-        
         if (! isset($this->connections[$nodeId])) {
             $this->connections[$nodeId] = phpiredis_connect($node['ip'], $node['port']);
         }
