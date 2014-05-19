@@ -16,6 +16,12 @@ class Client
     // active connections to each node
     private $connections = array();
     
+    // cache for hashes and their corresponding master node
+    private $lookupMastersHashTable = array();
+    
+    // cache for hashes and their corresponding slave node
+    private $lookupSlavesHashTable = array();
+    
     // commands support and their hashing method
     private $commands = array(
         // -1 : unsupported
@@ -192,7 +198,6 @@ class Client
         $clusterNodes = explode("\n", $response, - 1);
         $count = count($clusterNodes);
         
-        
         for ($i = 0; $i < $count; $i ++) {
             if (strpos($clusterNodes[$i], 'slave') <= 0) {
                 
@@ -230,17 +235,34 @@ class Client
                 }
             }
         }
+                
         foreach ($slaveNodes as &$slave) {
             // if it's a slave that is not connected, we add the corresponding master
             if (! isset($slave['ip'])) {
                 $slave['ip'] = $masterNodes[$slave['slaveof']]['ip'];
                 $slave['port'] = $masterNodes[$slave['slaveof']]['port'];
-               
-            }             
+            }
             $slave['min'] = $masterNodes[$slave['slaveof']]['min'];
             $slave['max'] = $masterNodes[$slave['slaveof']]['max'];
         }
         
+        // check of the whole cluster, if a slave is missing, then we will add the missing master instead
+        foreach ($masterNodes as $masterId=>$masterInfos) {
+            // let's try to find the corresponding slave for the same hash slots
+            // echo 'master : ' . $masterInfos['min'] . ' -> ' . $masterInfos['max'] . PHP_EOL;
+            $slaveFound=false;
+            foreach($slaveNodes as $slaveInfos) {
+                // echo 'slave : ' . $slaveInfos['min'] . ' -> ' . $slaveInfos['max'] . PHP_EOL;
+                if($slaveInfos['min']==$masterInfos['min']) {
+                    $slaveFound=true;
+                    break;
+                }
+            }
+            if(!$slaveFound) {
+                $slaveNodes[$masterId]=$masterInfos;
+            }
+        }
+                
         $this->masterNodes = $masterNodes;
         $this->slaveNodes = $slaveNodes;
     }
@@ -298,31 +320,68 @@ class Client
                     
                     $selectedNodes = ($isCommandForSlave ? $this->slaveNodes : $this->masterNodes);
                     
-                    $choseNodeId = null;
+                    $chosenNodeId = null;
                     
-                    foreach ($selectedNodes as $potentialNodeId => $potentialNode) {
-                        if ($hash >= $potentialNode['min'] && $hash <= $potentialNode['max']) {
-                            $choseNodeId = $potentialNodeId;
-                            break;
+                    if ($isCommandForSlave) {
+                        if (isset($this->lookupSlavesHashTable[$hash])) {
+                            $chosenNodeId = $this->lookupSlavesHashTable[$hash];
+                        }
+                    } else {
+                        if (isset($this->lookupMastersHashTable[$hash])) {
+                            $chosenNodeId = $this->lookupMastersHashTable[$hash];
                         }
                     }
                     
-                    $connection = $this->connect($choseNodeId, $selectedNodes[$choseNodeId]);
-                    if ($isCommandForSlave) {
-                        $fullCommand = array(
-                            'READONLY',
-                            $command . ' ' . implode(' ', $args)
-                        );
-                        $output = phpiredis_multi_command($connection, $fullCommand);
-                        return $output;
-                    } else {
-                        foreach ($args as &$arg) {
-                            $arg = strval($arg);
+                    // if we do not have the matching node in "cache", let's find it
+                    if ($chosenNodeId == null) {
+                        foreach ($selectedNodes as $potentialNodeId => $potentialNode) {
+                            if ($hash >= $potentialNode['min'] && $hash <= $potentialNode['max']) {
+                                $chosenNodeId = $potentialNodeId;
+                                break;
+                            }
                         }
-                        $output = phpiredis_command_bs($connection, array_merge(array(
-                            $command
-                        ), (array) ($args)));
-                        return $output;
+                    }
+                    
+                    if ($chosenNodeId == null) {
+                        
+                        echo $command . ' ' . implode(' ', $args) . PHP_EOL;
+                        
+                        if ($isCommandForSlave) {
+                            print_r($this->slaveNodes);
+                        }
+                        else {
+                            print_r($this->masterNodes);
+                        }
+                        
+                        
+                        throw new \Exception('Cannot find a node for this slot: ' . $hash);
+                    } else {
+                        if ($isCommandForSlave) {
+                            $this->lookupSlavesHashTable[$hash] = $chosenNodeId;
+                        } else {
+                            $this->lookupMastersHashTable[$hash] = $chosenNodeId;
+                        }
+                        
+                        
+                        $connection = $this->connect($chosenNodeId, $selectedNodes[$chosenNodeId]);
+                        if ($isCommandForSlave) {
+                            $fullCommand = array(
+                                'READONLY',
+                                $command . ' ' . implode(' ', $args)
+                            );
+                            // echo $command . ' ' . implode(' ', $args) . PHP_EOL;
+                            $output = phpiredis_multi_command($connection, $fullCommand);
+                            return $output;
+                        } else {
+                            foreach ($args as &$arg) {
+                                $arg = strval($arg);
+                            }
+                            $output = phpiredis_command_bs($connection, array_merge(array(
+                                $command
+                            ), (array) ($args)));
+                            // echo $command . ' ' . implode(' ', $args) . PHP_EOL;
+                            return $output;
+                        }
                     }
                 }
             }
@@ -331,6 +390,7 @@ class Client
 
     private function connect($nodeId, $node)
     {
+        
         if (! isset($this->connections[$nodeId])) {
             $this->connections[$nodeId] = phpiredis_connect($node['ip'], $node['port']);
         }
