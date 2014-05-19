@@ -235,7 +235,7 @@ class Client
                 }
             }
         }
-                
+        
         foreach ($slaveNodes as &$slave) {
             // if it's a slave that is not connected, we add the corresponding master
             if (! isset($slave['ip'])) {
@@ -247,22 +247,22 @@ class Client
         }
         
         // check of the whole cluster, if a slave is missing, then we will add the missing master instead
-        foreach ($masterNodes as $masterId=>$masterInfos) {
+        foreach ($masterNodes as $masterId => $masterInfos) {
             // let's try to find the corresponding slave for the same hash slots
             // echo 'master : ' . $masterInfos['min'] . ' -> ' . $masterInfos['max'] . PHP_EOL;
-            $slaveFound=false;
-            foreach($slaveNodes as $slaveInfos) {
+            $slaveFound = false;
+            foreach ($slaveNodes as $slaveInfos) {
                 // echo 'slave : ' . $slaveInfos['min'] . ' -> ' . $slaveInfos['max'] . PHP_EOL;
-                if($slaveInfos['min']==$masterInfos['min']) {
-                    $slaveFound=true;
+                if ($slaveInfos['min'] == $masterInfos['min']) {
+                    $slaveFound = true;
                     break;
                 }
             }
-            if(!$slaveFound) {
-                $slaveNodes[$masterId]=$masterInfos;
+            if (! $slaveFound) {
+                $slaveNodes[$masterId] = $masterInfos;
             }
         }
-                
+        
         $this->masterNodes = $masterNodes;
         $this->slaveNodes = $slaveNodes;
     }
@@ -343,17 +343,6 @@ class Client
                     }
                     
                     if ($chosenNodeId == null) {
-                        
-                        echo $command . ' ' . implode(' ', $args) . PHP_EOL;
-                        
-                        if ($isCommandForSlave) {
-                            print_r($this->slaveNodes);
-                        }
-                        else {
-                            print_r($this->masterNodes);
-                        }
-                        
-                        
                         throw new \Exception('Cannot find a node for this slot: ' . $hash);
                     } else {
                         if ($isCommandForSlave) {
@@ -361,8 +350,6 @@ class Client
                         } else {
                             $this->lookupMastersHashTable[$hash] = $chosenNodeId;
                         }
-                        
-                        
                         $connection = $this->connect($chosenNodeId, $selectedNodes[$chosenNodeId]);
                         if ($isCommandForSlave) {
                             $fullCommand = array(
@@ -390,7 +377,6 @@ class Client
 
     private function connect($nodeId, $node)
     {
-        
         if (! isset($this->connections[$nodeId])) {
             $this->connections[$nodeId] = phpiredis_connect($node['ip'], $node['port']);
         }
