@@ -265,6 +265,13 @@ class Client
         
         $this->masterNodes = $masterNodes;
         $this->slaveNodes = $slaveNodes;
+        
+        return array('masterNodes' => $masterNodes, 'slaveNodes' => $slaveNodes);
+    }
+    
+    public function setClusterTopology($masterNodes, $slaveNodes) {
+        $this->masterNodes = $masterNodes;
+        $this->slaveNodes = $slaveNodes;
     }
 
     public function __call($method, $args = array())
@@ -358,7 +365,7 @@ class Client
                             );
                             // echo $command . ' ' . implode(' ', $args) . PHP_EOL;
                             $output = phpiredis_multi_command($connection, $fullCommand);
-                            return $output;
+                            return $output[1];
                         } else {
                             foreach ($args as &$arg) {
                                 $arg = strval($arg);
