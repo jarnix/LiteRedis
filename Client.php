@@ -4,14 +4,14 @@ namespace LiteRedis;
 class Client
 {
     
-    // all the nodes from the main code
+    // the nodes given by the application
+    private $addedNodes = array();
+    
+    // all the nodes by id
     private $allNodes = array();
     
-    // master nodes, for writing
-    private $masterNodes = array();
-    
-    // slave nodes, for reading
-    private $slaveNodes = array();
+    // slots
+    private $slots = array();
     
     // active connections to each node
     private $connections = array();
@@ -24,6 +24,7 @@ class Client
     
     // commands support and their hashing method
     private $commands = array(
+        
         // -1 : unsupported
         // 0->10 : read
         // 10->20 : write
@@ -135,8 +136,8 @@ class Client
     
         /* scripting */
         'EVAL' => 14, // TODO
-        'EVALSHA' => 14 // TODO
-        );
+        'EVALSHA' => 14
+    ); // TODO
 
     public function __construct()
     {
@@ -147,8 +148,8 @@ class Client
 
     public function addNode($ip, $port)
     {
-        if (! isset($this->allNodes[$ip . ':' . $port])) {
-            $this->allNodes[$ip . ':' . $port] = array(
+        if (! isset($this->addedNodes[$ip . ':' . $port])) {
+            $this->addedNodes[$ip . ':' . $port] = array(
                 'ip' => $ip,
                 'port' => $port
             );
@@ -161,7 +162,7 @@ class Client
         $nbTries = 0;
         $client = false;
         
-        $nodes = array_values($this->allNodes);
+        $nodes = array_values($this->addedNodes);
         
         while ($nbTries < count($nodes) && $client === false) {
             $randomNode = $nodes[$nbTries];
@@ -174,7 +175,7 @@ class Client
             throw new \Exception('All nodes of the cluster seem to be down.');
         }
         
-        // vérifier que le cluster est sain
+        // verify that the cluster is consistent
         $response = phpiredis_command_bs($client, array(
             'cluster',
             'info'
@@ -188,193 +189,240 @@ class Client
             'cluster',
             'nodes'
         ));
+        
         // replaces the line concerning this host by a proper syntax
         $response = str_replace(':0 myself,', $randomNode['ip'] . ':' . $randomNode['port'] . ' ', $response);
+        
+        /*
+         * $response = "4c018a7d3da91858afbb9eb9b376ca81a5e63c11 192.168.1.208:7100 master - 0 1414154054475 41 connected
+         * 01939672432f215c58ffd07e60a627560bff866a 192.168.1.105:7000 master - 0 1414154055477 40 connected 4596-8191 4596-8191 4596-8191
+         * 42d4c6c023a5584c387902f39a4fdec7c2dc38c0 192.168.1.96:7000 master - 0 1414154056480 36 connected 8692-12287
+         * 6cae0b7c0a1ae753553d5949e58099c7e344e2ef 192.168.1.105:7100 slave f5c10b16cbc28bf86c2092ad74b0071fbb1d3a9e 0 1414154055978 6 connected
+         * 0e06e0c85d7830a8a40e1d158fc5503d18e2f188 192.168.1.88:7100 slave 5dbf2e6a587982f99528084b059950bbac9d67db 0 1414154055477 42 connected
+         * 1f695374f0d0f6721df7b54484d2843cdbd895e6 192.168.1.88:7000 slave 4c018a7d3da91858afbb9eb9b376ca81a5e63c11 0 1414154054976 41 connected
+         * f5c10b16cbc28bf86c2092ad74b0071fbb1d3a9e 192.168.1.112:7000 myself,master - 0 0 1 connected 500-4095
+         * 5dbf2e6a587982f99528084b059950bbac9d67db 192.168.1.208:7000 master - 0 1414154055978 42 connected 0-499 4096-4595 8192-8691 12288-12787
+         * f6afa8eb6a5fe4ef7d9dec007c847acef63a8ef2 192.168.1.178:7000 master - 0 1414154055978 34 connected 12788-16383
+         * 0943d94c3053003911423a4fb872dcacd853fdc7 192.168.1.112:7100 slave 01939672432f215c58ffd07e60a627560bff866a 0 1414154054475 40 connected
+         * eb76c3e4f3646182b8f0a4e83a8a459af8f17987 192.168.1.96:7100 slave f6afa8eb6a5fe4ef7d9dec007c847acef63a8ef2 0 1414154054475 34 connected
+         * 88ef18626abf4a2911e8edde8466f2911314ea45 192.168.1.178:7100 slave 42d4c6c023a5584c387902f39a4fdec7c2dc38c0 0 1414154054976 36 connected";
+         */
+        
+        // list of the slots
+        $slots = array();
         
         // list of the master and slave nodes
         $masterNodes = array();
         $slaveNodes = array();
         
-        $clusterNodes = explode("\n", $response, - 1);
+        $alreadySeenSlots = array();
+        
+        $clusterNodes = explode("\n", $response);
         $count = count($clusterNodes);
         
         for ($i = 0; $i < $count; $i ++) {
-            if (strpos($clusterNodes[$i], 'slave') <= 0) {
+            
+            if (strpos($clusterNodes[$i], 'slave') === false) {
                 
                 $nodeArr = explode(' ', $clusterNodes[$i]);
                 
                 // we add the master node only if its state is connected
-                if ($nodeArr[count($nodeArr) - 1] != 'disconnected') {
-                    $slots = explode('-', $nodeArr[8], 2);
+                if (strpos($clusterNodes[$i], ' connected') !== false) {
+                    
                     $host = $nodeArr[1];
                     $hostArr = explode(':', $host);
+                    
                     $masterNodes[$nodeArr[0]] = array(
                         'ip' => $hostArr[0],
-                        'port' => $hostArr[1],
-                        'connected' => ($nodeArr[8] == 'connected'),
-                        'min' => $slots[0],
-                        'max' => $slots[1]
+                        'port' => $hostArr[1]
                     );
+                    
+                    if (preg_match_all('/(\d+)\-(\d+)/', $clusterNodes[$i], $matches, PREG_SET_ORDER)) {
+                        foreach ($matches as $match) {
+                            
+                            $min = $match[1];
+                            $max = $match[2];
+                            
+                            if (! in_array($min . '-' . $max, $alreadySeenSlots)) {
+                                
+                                $slots[] = array(
+                                    'min' => $min,
+                                    'max' => $max,
+                                    'master' => array(
+                                        'ip' => $hostArr[0],
+                                        'port' => $hostArr[1],
+                                        'id' => $nodeArr[0]
+                                    )
+                                );
+                                
+                                $alreadySeenSlots[] = $min . '-' . $max;
+                            }
+                        }
+                    }
                 }
             } else {
-                $nodeArr = explode(' ', $clusterNodes[$i], 9);
                 
-                // it the slave is not connected, we will use the master instead without any warning
-                if ($nodeArr[7] != 'connected') {
-                    $slaveNodes[$nodeArr[3]] = array(
-                        'slaveof' => $nodeArr[3]
-                    );
-                } else {
-                    $host = $nodeArr[1];
-                    $hostArr = explode(':', $host);
-                    $slaveNodes[$nodeArr[0]] = array(
-                        'ip' => $hostArr[0],
-                        'port' => $hostArr[1],
-                        'slaveof' => $nodeArr[3]
-                    );
+                $nodeArr = explode(' ', $clusterNodes[$i]);
+                
+                $host = $nodeArr[1];
+                $hostArr = explode(':', $host);
+                
+                if (preg_match('/slave ([a-f0-9]+)/', $clusterNodes[$i], $matches)) {
+                    $slaveOf = $matches[1];
+                    
+                    // it the slave is not connected, we will use the master instead without any warning
+                    if (strpos($clusterNodes[$i], ' connected') === false) {
+                        $slaveNodes[$nodeArr[0]] = array(
+                            'slaveof' => $slaveOf
+                        );
+                    } else {
+                        $slaveNodes[$nodeArr[0]] = array(
+                            'ip' => $hostArr[0],
+                            'port' => $hostArr[1],
+                            'slaveof' => $slaveOf
+                        );
+                    }
                 }
             }
         }
         
-        foreach ($slaveNodes as &$slave) {
+        foreach ($slaveNodes as $nodeId => $slaveInfos) {
+            
             // if it's a slave that is not connected, we add the corresponding master
-            if (! isset($slave['ip'])) {
-                $slave['ip'] = $masterNodes[$slave['slaveof']]['ip'];
-                $slave['port'] = $masterNodes[$slave['slaveof']]['port'];
+            if (! isset($slaveInfos['ip'])) {
+                $slaveInfos['ip'] = $masterNodes[$slaveInfos['slaveof']]['ip'];
+                $slaveInfos['port'] = $masterNodes[$slaveInfos['slaveof']]['port'];
             }
-            $slave['min'] = $masterNodes[$slave['slaveof']]['min'];
-            $slave['max'] = $masterNodes[$slave['slaveof']]['max'];
-        }
-        
-        // check of the whole cluster, if a slave is missing, then we will add the missing master instead
-        foreach ($masterNodes as $masterId => $masterInfos) {
-            // let's try to find the corresponding slave for the same hash slots
-            // echo 'master : ' . $masterInfos['min'] . ' -> ' . $masterInfos['max'] . PHP_EOL;
-            $slaveFound = false;
-            foreach ($slaveNodes as $slaveInfos) {
-                // echo 'slave : ' . $slaveInfos['min'] . ' -> ' . $slaveInfos['max'] . PHP_EOL;
-                if ($slaveInfos['min'] == $masterInfos['min']) {
-                    $slaveFound = true;
-                    break;
+            foreach ($slots as &$slot) {
+                if ($slot['master']['id'] == $slaveInfos['slaveof']) {
+                    $slot['slave'] = array(
+                        'id' => $nodeId,
+                        'ip' => $slaveInfos['ip'],
+                        'port' => $slaveInfos['port']
+                    );
                 }
             }
-            if (! $slaveFound) {
-                $slaveNodes[$masterId] = $masterInfos;
-            }
+            reset($slots);
+            unset($slot);
         }
         
-        $this->masterNodes = $masterNodes;
-        $this->slaveNodes = $slaveNodes;
-        
-        return array('masterNodes' => $masterNodes, 'slaveNodes' => $slaveNodes);
+        return $slots;
     }
-    
-    public function setClusterTopology($masterNodes, $slaveNodes) {
-        $this->masterNodes = $masterNodes;
-        $this->slaveNodes = $slaveNodes;
+
+    public function setClusterTopology($slots)
+    {
+        $this->slots = $slots;
+        $nodeTypes = array(
+            'master',
+            'slave'
+        );
+        foreach ($this->slots as $slot) {
+            foreach ($nodeTypes as $nodeType)
+                if (! isset($this->allNodes[$slot[$nodeType]['id']])) {
+                    $this->allNodes[$slot[$nodeType]['id']] = array(
+                        'ip' => $slot[$nodeType]['ip'],
+                        'port' => $slot[$nodeType]['port']
+                    );
+                }
+        }
+                
     }
 
     public function __call($method, $args = array())
     {
-        if (! count($this->masterNodes) && ! count($this->slaveNodes)) {
-            $this->getClusterTopology();
-        }
-        
-        $command = strtoupper($method);
-        
-        if (isset($this->commands[$command])) {
+        if (! count($this->slots)) {
+            throw new \Exception('You need to setup the cluster topology');
+        } else {
+            $command = strtoupper($method);
             
-            $hashingAlgo = $this->commands[$command];
-            
-            $isCommandForSlave = true;
-            
-            // if it's a write command, we will query a master
-            if ($hashingAlgo >= 10) {
-                $isCommandForSlave = false;
-                $hashingAlgo = $hashingAlgo - 10;
-            }
-            
-            if (count($args)) {
+            if (isset($this->commands[$command])) {
                 
-                $keyUsedForHash = null;
+                $hashingAlgo = $this->commands[$command];
                 
-                switch ($hashingAlgo) {
-                    case 0:
-                        $keyUsedForHash = $args[0];
-                        break;
-                    case 1:
-                        if (count($args) == 1) {
-                            $keyUsedForHash = $args[0];
-                        }
-                        break;
-                    case 2:
-                        if (count($args) == 2) {
-                            $keyUsedForHash = $args[0];
-                        }
-                        break;
-                    case 3:
-                        if (count($args) == 2) {
-                            $keyUsedForHash = $args[0];
-                        }
-                        break;
-                    case 4:
-                        throw new \Exception('Scripting is not yet supported by this class');
-                        break;
+                $isCommandForSlave = true;
+                
+                // if it's a write command, we will query a master
+                if ($hashingAlgo >= 10) {
+                    $isCommandForSlave = false;
+                    $hashingAlgo = $hashingAlgo - 10;
                 }
                 
-                if ($keyUsedForHash != null) {
-                    $hash = $this->hash($keyUsedForHash) % 16384;
+                if (count($args)) {
                     
-                    $selectedNodes = ($isCommandForSlave ? $this->slaveNodes : $this->masterNodes);
+                    $keyUsedForHash = null;
                     
-                    $chosenNodeId = null;
-                    
-                    if ($isCommandForSlave) {
-                        if (isset($this->lookupSlavesHashTable[$hash])) {
-                            $chosenNodeId = $this->lookupSlavesHashTable[$hash];
-                        }
-                    } else {
-                        if (isset($this->lookupMastersHashTable[$hash])) {
-                            $chosenNodeId = $this->lookupMastersHashTable[$hash];
-                        }
+                    switch ($hashingAlgo) {
+                        case 0:
+                            $keyUsedForHash = $args[0];
+                            break;
+                        case 1:
+                            if (count($args) == 1) {
+                                $keyUsedForHash = $args[0];
+                            }
+                            break;
+                        case 2:
+                        case 3:
+                            if (count($args) == 2) {
+                                $keyUsedForHash = $args[0];
+                            }
+                            break;
+                        case 4:
+                            throw new \Exception('Scripting is not yet supported by this class');
+                            break;
                     }
                     
-                    // if we do not have the matching node in "cache", let's find it
-                    if ($chosenNodeId == null) {
-                        foreach ($selectedNodes as $potentialNodeId => $potentialNode) {
-                            if ($hash >= $potentialNode['min'] && $hash <= $potentialNode['max']) {
-                                $chosenNodeId = $potentialNodeId;
-                                break;
+                    if ($keyUsedForHash != null) {
+                        $hash = $this->hash($keyUsedForHash) % 16384;
+                        
+                        $selectedNodeType = ($isCommandForSlave ? 'slave' : 'master');
+                        
+                        $chosenNodeId = null;
+                        
+                        if ($isCommandForSlave) {
+                            if (isset($this->lookupSlavesHashTable[$hash])) {
+                                $chosenNodeId = $this->lookupSlavesHashTable[$hash];
+                            }
+                        } else {
+                            if (isset($this->lookupMastersHashTable[$hash])) {
+                                $chosenNodeId = $this->lookupMastersHashTable[$hash];
                             }
                         }
-                    }
-                    
-                    if ($chosenNodeId == null) {
-                        throw new \Exception('Cannot find a node for this slot: ' . $hash);
-                    } else {
-                        if ($isCommandForSlave) {
-                            $this->lookupSlavesHashTable[$hash] = $chosenNodeId;
-                        } else {
-                            $this->lookupMastersHashTable[$hash] = $chosenNodeId;
-                        }
-                        $connection = $this->connect($chosenNodeId, $selectedNodes[$chosenNodeId]);
-                        if ($isCommandForSlave) {
-                            $fullCommand = array(
-                                'READONLY',
-                                $command . ' ' . implode(' ', $args)
-                            );
-                            // echo $command . ' ' . implode(' ', $args) . PHP_EOL;
-                            $output = phpiredis_multi_command($connection, $fullCommand);
-                            return $output[1];
-                        } else {
-                            foreach ($args as &$arg) {
-                                $arg = strval($arg);
+                        
+                        // if we do not have the matching node in "cache", let's find it
+                        if ($chosenNodeId == null) {
+                            foreach ($this->slots as $slot) {
+                                if ($hash >= $slot['min'] && $hash <= $slot['max']) {
+                                    $chosenNodeId = $slot[$selectedNodeType]['id'];
+                                    break;
+                                }
                             }
-                            $output = phpiredis_command_bs($connection, array_merge(array(
-                                $command
-                            ), (array) ($args)));
-                            // echo $command . ' ' . implode(' ', $args) . PHP_EOL;
-                            return $output;
+                        }
+                        
+                        if ($chosenNodeId == null) {
+                            throw new \Exception('Cannot find a node for this slot: ' . $hash);
+                        } else {
+                            if ($isCommandForSlave) {
+                                $this->lookupSlavesHashTable[$hash] = $chosenNodeId;
+                            } else {
+                                $this->lookupMastersHashTable[$hash] = $chosenNodeId;
+                            }
+                            $connection = $this->connect($chosenNodeId, $this->allNodes[$chosenNodeId]['ip'], $this->allNodes[$chosenNodeId]['port']);
+                            if ($isCommandForSlave) {
+                                $fullCommand = array(
+                                    'READONLY',
+                                    $command . ' ' . implode(' ', $args)
+                                );
+                                $output = phpiredis_multi_command($connection, $fullCommand);
+                                return $output[1];
+                            } else {
+                                foreach ($args as &$arg) {
+                                    $arg = strval($arg);
+                                }
+                                $output = phpiredis_command_bs($connection, array_merge(array(
+                                    $command
+                                ), (array) ($args)));
+                                return $output;
+                            }
                         }
                     }
                 }
@@ -382,13 +430,13 @@ class Client
         }
     }
 
-    private function connect($nodeId, $node)
+    private function connect($nodeId, $ip, $port)
     {
         if (! isset($this->connections[$nodeId])) {
-            $this->connections[$nodeId] = phpiredis_connect($node['ip'], $node['port']);
+            $this->connections[$nodeId] = phpiredis_connect($ip, $port);
         }
         if ($this->connections[$nodeId] == false) {
-            throw new \Exception('The node ' . $node['ip'] . ':' . $node['port'] . ' seems to be down');
+            throw new \Exception('The node ' . $ip . ':' . $port . ' seems to be down');
         }
         return $this->connections[$nodeId];
     }
