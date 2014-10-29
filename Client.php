@@ -316,16 +316,17 @@ class Client
             'master',
             'slave'
         );
+
         foreach ($this->slots as $slot) {
-            foreach ($nodeTypes as $nodeType)
-                if (! isset($this->allNodes[$slot[$nodeType]['id']])) {
+            foreach ($nodeTypes as $nodeType) {
+                if (isset($slot[$nodeType]['id']) && ! isset($this->allNodes[$slot[$nodeType]['id']])) {
                     $this->allNodes[$slot[$nodeType]['id']] = array(
                         'ip' => $slot[$nodeType]['ip'],
                         'port' => $slot[$nodeType]['port']
                     );
                 }
+            }
         }
-                
     }
 
     public function __call($method, $args = array())
@@ -392,7 +393,12 @@ class Client
                         if ($chosenNodeId == null) {
                             foreach ($this->slots as $slot) {
                                 if ($hash >= $slot['min'] && $hash <= $slot['max']) {
-                                    $chosenNodeId = $slot[$selectedNodeType]['id'];
+                                    if (!isset($slot[$selectedNodeType]['id']) && isset($slot['master']['id'])) {
+                                        // we dont have slave node, we use the master node to read
+                                        $chosenNodeId = $slot['master']['id'];
+                                    } else {
+                                        $chosenNodeId = $slot[$selectedNodeType]['id'];
+                                    }
                                     break;
                                 }
                             }
